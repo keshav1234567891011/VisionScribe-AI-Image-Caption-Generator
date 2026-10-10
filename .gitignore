@@ -1,16 +1,23 @@
+.idea/
 __pycache__/
 *.py[cod]
-
 .venv/
+.venv-*/
 venv/
-
-.env
 .DS_Store
-
-.idea/
 .vscode/
-
 .pytest_cache/
 .coverage
+htmlcov/
+*.log
+*.tmp
 
+# Local credentials and environment configuration
+.env
+.env.*
 .streamlit/secrets.toml
+.cache/
+huggingface/
+hf_cache/
+*.safetensors
+pytorch_model*.bin

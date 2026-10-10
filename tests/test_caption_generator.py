@@ -1,164 +1,125 @@
-"""Regression checks for the original decoder contract and upload workflow."""
+"""Offline unit tests: all pretrained loaders are mocked."""
 
-from io import BytesIO
-from pathlib import Path
-import unittest
+import sys
 from unittest.mock import Mock, patch
 
-from keras_preprocessing.text import Tokenizer
-import numpy as np
 from PIL import Image
-from streamlit.testing.v1 import AppTest
+import pytest
+import torch
 
 import caption_generator as generator
-from utils import format_caption, open_uploaded_image
 
 
-class SequenceModel:
-    """Return known next-word indices and retain decoder inputs for assertions."""
-
-    def __init__(self, indices: list[int]) -> None:
-        self.indices = iter(indices)
-        self.sequences = []
-
-    def predict(self, inputs, verbose=0):
-        self.sequences.append(inputs[1].copy())
-        result = np.zeros((1, 100), dtype=np.float32)
-        result[0, next(self.indices)] = 1
-        return result
+@pytest.fixture(autouse=True)
+def reset_caches():
+    generator.load_caption_model.clear()
+    generator.load_processor.clear()
+    yield
+    generator.load_caption_model.clear()
+    generator.load_processor.clear()
 
 
-class CaptionTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tokenizer = Tokenizer()
-        self.tokenizer.fit_on_texts(["startseq little girl endseq"])
-        self.features = np.zeros((1, generator.FEATURE_SIZE), dtype=np.float32)
-
-    def test_decoder_stops_at_end_token_and_preserves_pre_padding(self) -> None:
-        indices = [self.tokenizer.word_index[word] for word in
-                   ("little", "girl", "endseq")]
-        model = SequenceModel(indices)
-        caption = generator.predict_caption(model, self.features, self.tokenizer)
-        self.assertEqual(caption, "Little girl.")
-        self.assertEqual(len(model.sequences), 3)
-        self.assertEqual(model.sequences[0].shape, (1, 35))
-        self.assertTrue(np.all(model.sequences[0][0, :-1] == 0))
-        self.assertEqual(model.sequences[0][0, -1],
-                         self.tokenizer.word_index["startseq"])
-
-    def test_unknown_index_returns_partial_caption(self) -> None:
-        model = SequenceModel([self.tokenizer.word_index["little"], 99])
-        self.assertEqual(generator.predict_caption(model, self.features,
-                                                   self.tokenizer), "Little.")
-
-    def test_generation_limit_and_reverse_vocabulary_fallback(self) -> None:
-        self.tokenizer.index_word = {}
-        model = SequenceModel([self.tokenizer.word_index["little"]] * 35)
-        caption = generator.predict_caption(model, self.features, self.tokenizer)
-        self.assertEqual(len(model.sequences), 35)
-        self.assertEqual(len(caption.split()), 35)
-        self.assertNotIn("startseq", caption)
-
-    def test_all_upload_formats_and_rgb_preprocessing(self) -> None:
-        for file_format, mode in (("JPEG", "RGB"), ("PNG", "RGBA"),
-                                  ("WEBP", "RGBA"), ("PNG", "L")):
-            with self.subTest(file_format=file_format, mode=mode):
-                upload = BytesIO()
-                Image.new(mode, (17, 23)).save(upload, format=file_format)
-                upload.seek(0)
-                image = open_uploaded_image(upload)
-                self.assertEqual(image.mode, "RGB")
-                batch = generator.preprocess_image(image)
-                self.assertEqual(batch.shape, (1, 224, 224, 3))
-                self.assertEqual(batch.dtype, np.float32)
-        red = generator.preprocess_image(Image.new("RGB", (1, 1), "red"))
-        np.testing.assert_allclose(red[0, 0, 0], [-103.939, -116.779, 131.32],
-                                   atol=0.001)
-
-    def test_invalid_upload_has_friendly_error(self) -> None:
-        with self.assertRaisesRegex(ValueError, "couldn't open"):
-            open_uploaded_image(BytesIO(b"not an image"))
-
-    def test_caption_formatting(self) -> None:
-        self.assertEqual(format_caption("startseq little girl endseq"), "Little girl.")
-        self.assertEqual(format_caption("STARTSEQ hello! ENDSEQ"), "Hello!")
-        self.assertEqual(format_caption("startseq endseq"), "")
-
-    def test_missing_artifacts_have_friendly_errors(self) -> None:
-        for path_name, loader, filename in (
-            ("MODEL_PATH", generator.load_caption_model, "best_model.h5"),
-            ("TOKENIZER_PATH", generator.load_tokenizer, "tokenizer.pkl"),
-        ):
-            loader.clear()
-            with patch.object(generator, path_name, Path("missing-artifact")):
-                with self.assertRaisesRegex(generator.CaptionGenerationError, filename):
-                    loader()
-            loader.clear()
-
-    def test_prediction_failure_has_friendly_error(self) -> None:
-        with patch.object(generator, "load_caption_model"), \
-             patch.object(generator, "load_tokenizer", return_value=self.tokenizer), \
-             patch.object(generator, "load_image_encoder") as encoder:
-            encoder.return_value.predict.side_effect = RuntimeError("prediction failed")
-            with self.assertRaisesRegex(generator.CaptionGenerationError,
-                                        "couldn't generate"):
-                generator.generate_caption(Image.new("RGB", (10, 10)))
-
-    def test_models_and_tokenizer_are_cached(self) -> None:
-        generator.load_caption_model.clear()
-        generator.load_image_encoder.clear()
-        generator.load_tokenizer.clear()
-
-        decoder = Mock(input_shape=[(None, 4096), (None, 35)])
-        with patch.object(generator, "load_model", return_value=decoder) as load, \
-             patch.object(generator, "VGG16") as vgg, \
-             patch.object(generator, "Model") as feature_model:
-            self.assertIs(generator.load_caption_model(), generator.load_caption_model())
-            load.assert_called_once_with(str(generator.MODEL_PATH), compile=False)
-            self.assertIs(generator.load_image_encoder(), generator.load_image_encoder())
-            vgg.assert_called_once_with(weights="imagenet", include_top=True)
-            feature_model.assert_called_once()
-            self.assertIs(generator.load_tokenizer(), generator.load_tokenizer())
-        generator.load_caption_model.clear()
-        generator.load_image_encoder.clear()
-        generator.load_tokenizer.clear()
-
-    def test_original_decoder_matches_tokenizer(self) -> None:
-        model = generator.load_caption_model()
-        tokenizer = generator.load_tokenizer()
-        self.assertEqual(model.input_shape, [(None, 4096), (None, 35)])
-        self.assertEqual(model.output_shape[-1], len(tokenizer.word_index) + 1)
-        sequence = np.zeros((1, 35), dtype=np.int32)
-        sequence[0, -1] = tokenizer.word_index["startseq"]
-        probabilities = model.predict([self.features, sequence], verbose=0)
-        self.assertEqual(probabilities.shape, (1, model.output_shape[-1]))
-        self.assertTrue(np.all(np.isfinite(probabilities)))
-
-    def test_streamlit_initial_screen_does_not_load_models(self) -> None:
-        with patch.object(generator, "load_caption_model") as loader:
-            app = AppTest.from_file("main.py").run(timeout=30)
-            self.assertEqual(len(app.exception), 0)
-            self.assertEqual(app.title[0].value, "VisionScribe")
-            self.assertTrue(app.button[0].disabled)
-            loader.assert_not_called()
-
-    def test_streamlit_generate_preserve_and_clear(self) -> None:
-        upload = BytesIO()
-        Image.new("RGB", (10, 10), "red").save(upload, format="PNG")
-        with patch("streamlit.file_uploader", return_value=upload), \
-             patch.object(generator, "generate_caption", return_value="A red image.") as predict:
-            app = AppTest.from_file("main.py").run(timeout=30)
-            self.assertEqual(len(app.exception), 0)
-            predict.assert_not_called()
-            app.button[0].click().run()
-            self.assertEqual(len(app.exception), 0)
-            self.assertEqual(app.session_state["caption"], "A red image.")
-            app.run()
-            predict.assert_called_once()
-            app.button[1].click().run()
-            self.assertEqual(app.session_state["upload_number"], 1)
-            self.assertNotIn("caption", app.session_state)
+def test_device_selection():
+    with patch("torch.cuda.is_available", return_value=False):
+        assert generator.select_device().type == "cpu"
+    with patch("torch.cuda.is_available", return_value=True):
+        assert generator.select_device().type == "cuda"
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_model_and_processor_load_once_and_eval():
+    from transformers import AutoProcessor, GitForCausalLM
+
+    model, processor = Mock(), Mock()
+    with patch.object(GitForCausalLM, "from_pretrained", return_value=model) as load, \
+         patch.object(AutoProcessor, "from_pretrained", return_value=processor) as process, \
+         patch("huggingface_hub.snapshot_download", return_value="cached-snapshot") as snapshot, \
+         patch.object(generator, "select_device", return_value=torch.device("cpu")):
+        assert generator.load_caption_model() is generator.load_caption_model()
+        assert generator.load_processor() is generator.load_processor()
+        snapshot.assert_called_once_with(generator.MODEL_ID, revision=generator.MODEL_REVISION,
+                                          allow_patterns=["config.json", "generation_config.json", "pytorch_model.bin"])
+        load.assert_called_once_with("cached-snapshot", local_files_only=True, low_cpu_mem_usage=True,
+                                     use_safetensors=False, trust_remote_code=False)
+        process.assert_called_once_with(generator.MODEL_ID, revision=generator.MODEL_REVISION,
+                                        use_fast=False, trust_remote_code=False)
+        model.eval.assert_called_once()
+        model.to.assert_called_once_with(torch.device("cpu"))
+
+
+@pytest.mark.parametrize("class_name,loader,message", [
+    ("GitForCausalLM", generator.load_caption_model, "captioning model"),
+    ("AutoProcessor", generator.load_processor, "image processor"),
+])
+def test_loading_failures_are_friendly(class_name, loader, message):
+    import transformers
+
+    with patch.object(getattr(transformers, class_name), "from_pretrained",
+                      side_effect=OSError("private/internal/path")), \
+         patch("huggingface_hub.snapshot_download", return_value="cached-snapshot"):
+        with pytest.raises(generator.CaptionGenerationError, match=message) as error:
+            loader()
+        assert "private" not in str(error.value)
+
+
+def mock_resources():
+    processor = Mock()
+    inputs = Mock()
+    pixels = torch.zeros((1, 3, 224, 224))
+    inputs.to.return_value = {"pixel_values": pixels}
+    processor.return_value = inputs
+    processor.batch_decode.return_value = [" a cat on a couch "]
+    model = Mock(device=torch.device("cpu"))
+    model.generate.return_value = torch.tensor([[101, 103, 102]])
+    return model, processor, inputs
+
+
+def test_generation_configuration_decoding_and_inference_mode():
+    model, processor, inputs = mock_resources()
+    progress = []
+    model.generate.side_effect = lambda **kwargs: (
+        torch.tensor([[101, 103, 102]]) if torch.is_inference_mode_enabled()
+        else pytest.fail("Inference must disable autograd")
+    )
+    image = Image.new("RGB", (30, 40))
+    with patch.object(generator, "load_processor", return_value=processor), \
+         patch.object(generator, "load_caption_model", return_value=model):
+        assert generator.generate_caption(image, progress.append) == "A cat on a couch."
+    processor.assert_called_once_with(images=image, return_tensors="pt")
+    inputs.to.assert_called_once_with(model.device)
+    kwargs = model.generate.call_args.kwargs
+    assert kwargs["num_beams"] == generator.NUM_BEAMS > 1
+    assert kwargs["max_new_tokens"] == generator.MAX_NEW_TOKENS
+    assert kwargs["no_repeat_ngram_size"] == generator.NO_REPEAT_NGRAM_SIZE
+    assert kwargs["early_stopping"] is True
+    assert kwargs["do_sample"] is False
+    processor.batch_decode.assert_called_once()
+    assert processor.batch_decode.call_args.kwargs == {"skip_special_tokens": True}
+    assert len(progress) == 3
+    assert "Loading" in progress[0]
+    assert "Analyzing" in progress[1]
+    assert "Generating" in progress[2]
+
+
+@pytest.mark.parametrize("failure,message", [(RuntimeError("bad inference"), "couldn't generate"),
+                                           (MemoryError(), "memory"),
+                                           (RuntimeError("DefaultCPUAllocator: not enough memory"), "memory")])
+def test_inference_errors(failure, message):
+    model, processor, _ = mock_resources()
+    model.generate.side_effect = failure
+    with patch.object(generator, "load_processor", return_value=processor), \
+         patch.object(generator, "load_caption_model", return_value=model), \
+         pytest.raises(generator.CaptionGenerationError, match=message):
+        generator.generate_caption(Image.new("RGB", (10, 10)))
+
+
+def test_empty_decoded_caption():
+    model, processor, _ = mock_resources()
+    processor.batch_decode.return_value = [" "]
+    with patch.object(generator, "load_processor", return_value=processor), \
+         patch.object(generator, "load_caption_model", return_value=model), \
+         pytest.raises(generator.CaptionGenerationError, match="another photo"):
+        generator.generate_caption(Image.new("RGB", (10, 10)))
+
+
+def test_no_tensorflow_in_v2_process():
+    assert not any(name == "tensorflow" or name.startswith("tensorflow.") for name in sys.modules)
