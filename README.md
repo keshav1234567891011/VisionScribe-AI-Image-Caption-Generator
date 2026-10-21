@@ -1,197 +1,174 @@
-# VisionScribe – AI Image Caption Generator
+# VisionScribe - AI Image Caption Generator
+
+**A computer vision and natural language processing portfolio project that turns photographs into short captions using a VGG16 encoder, an LSTM decoder, and Streamlit.**
+
+[**Try the Live Demo**](https://image-caption-generator-mvzdrcuzwoepbfhnzmsa4b.streamlit.app/) | [Source Code](https://github.com/keshav1234567891011/VisionScribe-AI-Image-Caption-Generator)
+
+![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![TensorFlow 2.15.1](https://img.shields.io/badge/TensorFlow-2.15.1-FF6F00?logo=tensorflow&logoColor=white)
+![Streamlit 1.41.1](https://img.shields.io/badge/Streamlit-1.41.1-FF4B4B?logo=streamlit&logoColor=white)
+![Architecture VGG16 + LSTM](https://img.shields.io/badge/Architecture-VGG16%20%2B%20LSTM-6C63FF)
+![Dataset Flickr8k](https://img.shields.io/badge/Dataset-Flickr8k-2E8B57)
 
 ## Overview
 
-VisionScribe turns an uploaded photo into a natural-language description using a
-VGG16 image encoder and a trained LSTM caption decoder. The Streamlit interface
-provides an image preview, explicit caption generation, and a clear result card.
-The application reuses the supplied trained model and tokenizer; no retraining is
-required.
+VisionScribe connects a pretrained visual encoder to a trained language decoder to generate captions one word at a time. The application packages the supplied model and tokenizer into an interactive upload, preview, and inference workflow. Running the app requires no retraining or dataset download.
 
-## Live Demo
-
-[Open VisionScribe][(https://YOUR-APP-NAME.streamlit.app](https://image-caption-generator-mvzdrcuzwoepbfhnzmsa4b.streamlit.app/))
+The portfolio work demonstrates transfer learning, multimodal inference, model artifact integration, modular Python application design, resource caching, and automated regression testing. The base captioning implementation is acknowledged under [Attribution](#attribution).
 
 ## Features
 
-- Upload JPG, JPEG, PNG, or WEBP images with an immediate preview.
-- Convert images to RGB and correct EXIF camera orientation.
-- Generate captions on demand with a progress spinner.
-- Display sentences without internal `startseq` and `endseq` markers.
-- Clear the current image and caption to start again.
-- Cache VGG16, the caption model, and tokenizer across Streamlit reruns.
-- Show friendly messages for invalid images, missing artifacts, and inference failures.
-- Learn about the model from the sidebar.
+- Upload JPG, JPEG, PNG, or WEBP images and preview them immediately.
+- Correct EXIF camera orientation and convert uploads to RGB.
+- Generate captions on demand with a progress indicator and a dedicated result card.
+- Remove internal sequence markers and format predictions as sentences.
+- Preserve captions across Streamlit reruns; clear the session for another upload.
+- Cache the encoder, decoder, and tokenizer for reuse.
+- Display helpful errors for invalid images, missing artifacts, and inference failures.
 
-## How It Works
-
-1. Upload an image and select **Generate Caption**.
-2. The application converts it to RGB, resizes it to 224 × 224, and applies
-   `tensorflow.keras.applications.vgg16.preprocess_input`.
-3. VGG16's `fc2` layer produces a 4096-dimensional feature vector.
-4. Starting with `startseq`, the decoder combines image features with the current
-   word sequence and predicts the most likely next word.
-5. Generation stops at `endseq`, an unmapped vocabulary index, or the 35-step limit.
-6. Internal markers are removed, the first letter is capitalized, and sentence
-   punctuation is added when needed.
-
-## Architecture
+## VGG16-LSTM Architecture
 
 ```text
-Uploaded Image
-      ↓
-VGG16 CNN
-      ↓
-4096-dimensional image features
-      ↓
-Embedding + LSTM
-      ↓
-Word-by-word prediction
-      ↓
-Generated Caption
+Image -> RGB -> 224 x 224 -> VGG16 preprocessing -> VGG16 fc2 (4096)
+                                                        |
+                                             Dropout(0.4) -> Dense(256, ReLU)
+                                                        |
+                                                        +--> Add -> Dense(256, ReLU)
+                                                        |                |
+Caption prefix -> Tokenizer -> Pre-pad to 35             |       Dense(vocabulary, softmax)
+                         |                              |                |
+                Embedding(256, mask_zero=True)          |       Greedy next-word selection
+                         |                              |                |
+                   Dropout(0.4) -> LSTM(256) ------------+       Append word and repeat
 ```
 
-VGG16 retains its fully connected layers through `fc2` and excludes only the final
-ImageNet prediction layer. Using `include_top=False` would produce incompatible
-features. In the saved decoder, the image branch uses Dropout and a Dense layer;
-the text branch uses Embedding, Dropout, and LSTM. Their outputs are added before
-the final Dense vocabulary prediction layers.
+The encoder uses ImageNet-pretrained VGG16 with `include_top=True` and takes the output of `fc2`, excluding the final ImageNet classification layer. Each image produces a `(1, 4096)` feature vector. The decoder accepts that vector and a `(1, 35)` token sequence, merges the image and text branches by addition, and predicts a probability distribution over the vocabulary.
 
-## Technologies Used
+The original `best_model.h5` decoder loads with `compile=False`; `tokenizer.pkl` supplies the matching vocabulary. Layer details follow the included training notebook. The app reuses these artifacts rather than fitting a new tokenizer or training a new model.
 
-- Python 3.11
-- Streamlit for the interface, session state, and resource caching
-- TensorFlow 2.15.1 / bundled Keras 2 for legacy H5 inference
-- NumPy for image batches and prediction selection
-- Pillow for image decoding and conversion
-- Keras-Preprocessing 1.1.2 to deserialize the original tokenizer
+## Dataset and Training Context
+
+The base model uses **Flickr8k**, a collection of approximately 8,000 photographs with five human-written captions per image. Its everyday scenes support learning associations between visual features and descriptive language.
+
+The included notebook documents:
+
+- Extraction and storage of VGG16 image features.
+- Lowercasing captions, filtering single-character words, and adding `startseq` / `endseq` markers.
+- Tokenization and padded caption prefixes paired with next-word targets.
+- An ordered 90% / 10% split by image ID, rather than the standard predefined dataset partitions.
+- Decoder training with Adam and categorical cross-entropy, plus BLEU-1 / BLEU-2 evaluation code.
+
+The notebook is historical training documentation. This README does not claim a newly reproduced benchmark or verified test-set score. The dataset is not needed for app inference; running the full notebook requires the dataset, adjusted paths, and additional research dependencies.
+
+## Image Preprocessing and Caption Workflow
+
+1. **Decode the upload:** Pillow opens the image, corrects EXIF orientation, and converts it to RGB.
+2. **Prepare the input:** Resize to `224 x 224` using nearest-neighbor interpolation, convert to `float32`, and add a batch dimension to obtain `(1, 224, 224, 3)`.
+3. **Normalize for VGG16:** Apply `tensorflow.keras.applications.vgg16.preprocess_input`, which changes RGB to BGR and subtracts ImageNet channel means.
+4. **Encode the image:** Extract the 4096-value `fc2` feature vector.
+5. **Decode a caption:** Begin with `startseq`, tokenize and pre-pad the current prefix to 35 positions, then choose the highest-probability next word using `argmax`.
+6. **Stop and format:** Stop at `endseq`, an unknown vocabulary index, a repeated `startseq`, or the 35-step limit. Remove sequence markers, capitalize the first letter, and add punctuation when needed.
+
+For illustration, `startseq little girl in pink dress endseq` becomes **Little girl in pink dress.** This illustrates formatting, not a guaranteed prediction. The formatter preserves the model's words without rewriting grammar.
+
+## Technology Stack
+
+| Component | Technology |
+| --- | --- |
+| Runtime | Python 3.11 |
+| Deep learning | TensorFlow 2.15.1 and bundled Keras 2 |
+| Visual encoder | ImageNet-pretrained VGG16 |
+| Caption decoder | Embedding, LSTM, and Dense layers |
+| Web interface | Streamlit 1.41.1 |
+| Numerical processing | NumPy (`>=1.23.5,<2`) |
+| Image handling | Pillow (`>=10.4,<12`) |
+| Tokenizer compatibility | Keras-Preprocessing 1.1.2 |
+| Regression checks | Python unittest and Streamlit AppTest |
 
 ## Project Structure
 
 ```text
-VisionScribe/
-├── main.py                       # Streamlit interface and session workflow
-├── caption_generator.py          # Cached loaders, preprocessing, decoding
-├── utils.py                      # Image loading and caption formatting
-├── tests/test_caption_generator.py # Inference and UI regression checks
-├── best_model.h5                 # Original trained caption model (unchanged)
-├── tokenizer.pkl                 # Original vocabulary (unchanged)
-├── image-caption-generator.ipynb  # Original training/reference notebook
-├── requirements.txt              # Runtime dependencies
-├── .streamlit/config.toml        # Interface theme
-├── .gitignore                    # Local environment and IDE exclusions
-└── README.md
+VisionScribe-AI-Image-Caption-Generator/
+|-- main.py                        # Streamlit interface and session workflow
+|-- caption_generator.py           # Cached loaders, preprocessing, greedy decoding
+|-- utils.py                       # Upload handling and caption formatting
+|-- tests/test_caption_generator.py # Inference and UI regression checks
+|-- best_model.h5                  # Trained caption decoder
+|-- tokenizer.pkl                  # Matching saved vocabulary
+|-- image-caption-generator.ipynb  # Historical training/reference notebook
+|-- requirements.txt               # Runtime dependencies
+|-- .streamlit/config.toml          # Interface theme
+|-- .gitignore
+`-- README.md
 ```
 
-## Installation
+## Installation and Local Usage
 
-Install Python **3.11**, download or clone this repository, and open a terminal in
-the project directory. Keep `best_model.h5` and `tokenizer.pkl` beside the Python
-files.
+Use **Python 3.11** with the pinned TensorFlow version to preserve compatibility with the legacy H5 model.
 
 ```bash
+git clone https://github.com/keshav1234567891011/VisionScribe-AI-Image-Caption-Generator.git
+cd VisionScribe-AI-Image-Caption-Generator
 python -m venv .venv
 ```
 
-Activate the environment on Windows PowerShell:
+Activate the virtual environment on Windows PowerShell:
 
 ```powershell
 .venv\Scripts\Activate.ps1
 ```
 
-Or on macOS/Linux:
+On macOS or Linux:
 
 ```bash
 source .venv/bin/activate
 ```
 
-Install the dependencies:
+Install dependencies and launch the app:
 
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-```
-
-## Running Locally
-
-```bash
 python -m streamlit run main.py
 ```
 
-Open the URL shown in your terminal. Model resources load on the first generation
-request and remain cached for subsequent interactions. The first request downloads
-the ImageNet VGG16 weights if they are not already in the Keras cache, so internet
-access is needed initially. A server restart clears the in-memory cache.
+Keep `best_model.h5` and `tokenizer.pkl` beside the Python files. Open the local URL printed by Streamlit, upload a photo, and select **Generate Caption**.
 
-Run the regression checks without downloading VGG16 weights:
+The first generation request loads the model resources and downloads ImageNet VGG16 weights if they are absent from the Keras cache. Initial internet access and sufficient memory are required. Resources stay cached across reruns until the server restarts.
+
+## Testing
+
+From the repository root, after installing dependencies, run:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-For **Streamlit Community Cloud**, push the project to GitHub, select `main.py` as
-the entry point, and choose **Python 3.11** in the deployment's advanced settings.
-Ensure both trained artifacts are included in the repository. Community Cloud
-installs `requirements.txt` and reads `.streamlit/config.toml` automatically.
+The existing suite checks caption formatting, supported uploads, RGB preprocessing, pre-padding, decoding stop conditions, resource caching, missing-artifact errors, decoder/tokenizer compatibility, and Streamlit generation and reset behavior. Encoder calls are mocked where needed, so the suite does not download VGG16 weights; artifact compatibility checks still load the supplied decoder and tokenizer.
 
-## Model Information
-
-- **Dataset:** Flickr8k, a collection of approximately 8,000 photographs with
-  multiple human-written captions per image.
-- **Encoder:** VGG16 with ImageNet weights, using `(1, 4096)` `fc2` features.
-- **Decoder:** Embedding and LSTM with a merged image feature branch.
-- **Sequence length:** 35, confirmed by the original notebook's saved output.
-- **Decoding:** Greedy next-word selection with pre-padding, matching the original
-  implementation.
-- **Artifacts:** The supplied `best_model.h5` and `tokenizer.pkl` are reused
-  unchanged. The model loads with `compile=False` because training state is not
-  needed for inference.
-
-The notebook is retained as historical training documentation. Running the app
-does not execute it or train the model. The app dependencies cover inference;
-running every notebook cell may require additional research packages and the dataset.
-
-## Example
-
-For a photo of a girl in a pink dress, an illustrative result might be:
-
-> Little girl in pink dress.
-
-A raw sequence such as `startseq little girl in pink dress endseq` becomes the
-sentence above. Formatting preserves predicted words; it does not invent missing
-articles or rewrite grammar. Actual results depend on the photo and trained model.
+For a manual smoke test, upload a valid photo, generate a caption, confirm it survives a rerun, then clear the upload. Also try an invalid image to check error feedback. These functional checks do not measure caption quality; that requires a held-out dataset and a reproducible evaluation protocol.
 
 ## Limitations
 
-- The Flickr8k vocabulary and training scenes limit generalization to unfamiliar
-  objects, abstract art, specialized images, and complex situations.
-- Captions can omit details, repeat words, or describe objects incorrectly.
-- Greedy decoding is fast but may produce less fluent sentences than other methods.
-- Large models require memory and make the first generation request slower,
-  especially on shared hosting.
-- The app describes images; it does not reliably read text or provide a complete
-  accessibility description.
+- Flickr8k's vocabulary and scene coverage limit generalization to unfamiliar objects, specialized imagery, and complex scenes.
+- Captions can omit details, repeat words, contain grammatical errors, or describe objects incorrectly.
+- Greedy decoding selects one next word at a time and may miss more fluent sequences.
+- Resizing to a square can distort the input; generation is capped at 35 decoding steps.
+- VGG16 has substantial memory requirements, and initial loading can be slow on shared hosting.
+- The app is an image description demo; it does not reliably read text or provide exhaustive accessibility descriptions.
+- No newly verified caption-quality metrics are reported here.
 
-## Future Improvements
+## Potential Extensions
 
-- Compare beam search with greedy decoding using the existing model.
-- Add downloadable captions and batch image uploads.
-- Evaluate caption quality on a held-out Flickr8k test set.
-- Explore richer captioning models as a separate, optional extension.
+- Compare greedy decoding with beam search under a reproducible evaluation protocol.
+- Add batch uploads and downloadable captions.
+- Evaluate on a documented held-out split using captioning metrics and qualitative error analysis.
+- Explore alternative encoders and language decoders as separate experiments.
 
-## Credits / Attribution
+## Attribution
 
-VisionScribe builds on an existing open-source image captioning implementation based on a VGG16 encoder and LSTM decoder trained on the Flickr8k dataset.
+VisionScribe builds on an existing open-source VGG16-LSTM image captioning implementation trained on Flickr8k. The exact upstream implementation has not yet been identified; credit for the base training work is not claimed as original to this application. If you know the source, please [open an issue](https://github.com/keshav1234567891011/VisionScribe-AI-Image-Caption-Generator/issues) so attribution can be made precise.
 
-This repository focuses on extending the original implementation into a cleaner, deployable application by adding:
+This repository's application work includes modular inference code, a Streamlit interface, image upload and preprocessing, cached resources, error handling, session-state management, automated tests, deployment configuration, and project documentation.
 
-- Modular inference code
-- Streamlit-based user interface
-- Image upload and preprocessing workflow
-- Cached model/resource loading
-- Error handling and session-state management
-- Automated tests
-- Deployment configuration and project documentation
-
-If you are the original author of the base implementation or know the exact upstream source, please open an issue so the attribution can be made more precise.
-
+Acknowledgments: the Flickr8k dataset creators and image contributors; the VGG16 researchers Karen Simonyan and Andrew Zisserman; and the TensorFlow/Keras, Streamlit, NumPy, and Pillow communities. Dataset, pretrained weights, and third-party software remain subject to their respective terms.
